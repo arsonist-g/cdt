@@ -182,6 +182,187 @@ function Invoke-SessionClean {
   return $removed
 }
 
+# --- 默认扩展加载: 从日常 profile 复制扩展状态(代码+存储+注册)到隔离 profile ---
+# 与 cookie 正交: cookie 走明文注入(ABE), 扩展状态无 ABE 可直接复制。
+# 复制后扩展是"已安装已配置"状态(非首启、带 chrome.storage 设置), 就像日常 profile 新开窗口。
+# 关键依据(已验证): extensions.settings 在 Secure Preferences 且无 per-entry MAC; path 是相对路径;
+#   manifest 含 key → unpacked 加载后 ID 稳定。
+
+function Get-DefaultProfile {
+  # 日常主 profile 路径: config.defaultProfile 优先, 否则探测默认 Edge 路径。都不在返回 $null(降级)。
+  $cfg = Read-Config
+  if ($cfg -and $cfg.defaultProfile) { return [string]$cfg.defaultProfile }
+  $default = Join-Path $env:LOCALAPPDATA "Microsoft\Edge\User Data"
+  if (Test-Path $default) { return $default }
+  return $null
+}
+
+function Get-ExtensionLatestDir([string]$extId) {
+  # 返回 <defaultProfile>\Default\Extensions\<id>\ 下版本号最大的目录(去 _0 后缀)。找不到 $null。
+  $ep = Get-DefaultProfile
+  if (-not $ep) { return $null }
+  $base = Join-Path $ep "Default\Extensions\$extId"
+  if (-not (Test-Path $base)) { return $null }
+  $latest = $null; $latestVer = $null
+  foreach ($d in (Get-ChildItem $base -Directory -ErrorAction SilentlyContinue)) {
+    $verStr = $d.Name -replace '_\d+$',''
+    try { $v = [version]$verStr } catch { continue }
+    if (-not $latestVer -or $v -gt $latestVer) { $latestVer = $v; $latest = $d.FullName }
+  }
+  return $latest
+}
+
+function Resolve-ExtensionName([string]$versionDir) {
+  # manifest.name 若是 __MSG_x__ 占位符, 走 _locales\<default_locale>\messages.json 解析。失败返回 $null。
+  $manifestPath = Join-Path $versionDir "manifest.json"
+  if (-not (Test-Path $manifestPath)) { return $null }
+  try { $m = Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop } catch { return $null }
+  $name = [string]$m.name
+  if ($name -notmatch '^__MSG_(.+)__$') { return $name }
+  $key = $matches[1]
+  $locale = [string]$m.default_locale
+  if (-not $locale) { return $null }
+  $msgPath = Join-Path $versionDir "_locales\$locale\messages.json"
+  if (-not (Test-Path $msgPath)) { return $null }
+  try {
+    $msg = Get-Content $msgPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+    $entry = $msg.$key
+    if ($entry -and $entry.message) { return [string]$entry.message }
+  } catch {}
+  return $null
+}
+
+function Get-InstalledExtensions {
+  # 扫描日常 profile 全部扩展, 返回 @{Id;Version;Name;Dir} 列表。defaultProfile 缺返回 @()。
+  $ep = Get-DefaultProfile
+  if (-not $ep) { return @() }
+  $extRoot = Join-Path $ep "Default\Extensions"
+  if (-not (Test-Path $extRoot)) { return @() }
+  $out = @()
+  foreach ($idDir in (Get-ChildItem $extRoot -Directory -ErrorAction SilentlyContinue)) {
+    $id = $idDir.Name
+    $verDir = Get-ExtensionLatestDir $id
+    if (-not $verDir) { continue }
+    $ver = Split-Path $verDir -Leaf
+    $name = Resolve-ExtensionName $verDir
+    if (-not $name) { $name = $id }
+    $out += [PSCustomObject]@{ Id = $id; Version = $ver; Name = $name; Dir = $verDir }
+  }
+  return $out
+}
+
+function Find-ExtensionIdByName([string]$query) {
+  # 名字包含匹配(不区分大小写), 返回候选 @{Id;Name} 列表。query 空返回 @()。
+  $q = $query.Trim()
+  if (-not $q) { return @() }
+  $out = @()
+  foreach ($e in (Get-InstalledExtensions)) {
+    if ($e.Name -and $e.Name.ToLower().Contains($q.ToLower())) {
+      $out += [PSCustomObject]@{ Id = $e.Id; Name = $e.Name }
+    }
+  }
+  return $out
+}
+
+function Get-WhitelistIds {
+  # 读 config.extensions, 归一化成数组(兼容 null/string/数组)。空返回 @()。
+  $cfg = Read-Config
+  if (-not $cfg -or -not $cfg.PSObject.Properties['extensions']) { return @() }
+  $v = $cfg.extensions
+  if ($v -is [string]) { return @($v) }
+  return @(@($v) | ForEach-Object { [string]$_ } | Where-Object { $_ })
+}
+
+function Set-WhitelistIds([string[]]$ids) {
+  # 写回 config.extensions(小写去重保序, 空则移除字段)。其他字段保留。
+  if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
+  $cfg = Read-Config
+  if (-not $cfg) { $cfg = [PSCustomObject]@{} }
+  $clean = @($ids | ForEach-Object { ([string]$_).ToLower().Trim() } | Where-Object { $_ } | Select-Object -Unique)
+  if ($clean.Count -eq 0) {
+    if ($cfg.PSObject.Properties['extensions']) { $cfg.PSObject.Properties.Remove('extensions') }
+  } else {
+    $cfg | Add-Member -NotePropertyName 'extensions' -NotePropertyValue $clean -Force
+  }
+  ($cfg | ConvertTo-Json -Depth 10) | Set-Content -Path $ConfigFile -Encoding utf8
+}
+
+function Resolve-ExtensionArgument([string]$arg) {
+  # 把用户传入(名字或 ID)解析为单个 ID。ID 形(^[a-p]{32}$)直用; 否则名字匹配。
+  # 0 命中报错; 1 命中返回; 多命中打印候选表。返回 $null 表示未解析。
+  if (-not $arg) { return $null }
+  if ($arg -match '^[a-p]{32}$') { return $arg.ToLower() }
+  $cands = @(Find-ExtensionIdByName $arg)
+  if ($cands.Count -eq 0) {
+    Write-Step "no installed extension matches '$arg' (run: cdt extensions list)"
+    return $null
+  }
+  if ($cands.Count -eq 1) { return $cands[0].Id }
+  Write-Step "multiple extensions match '$arg', be more specific or use the ID:"
+  foreach ($c in $cands) { Write-Host ("  {0,-34} {1}" -f $c.Id, $c.Name) }
+  return $null
+}
+
+function Copy-ExtensionToProfile([string]$extId, [string]$destProfile) {
+  # 复制单个扩展的代码 + chrome.storage 到隔离 profile, 返回代码目录路径($null=失败)。
+  # 代码由 start 后的 install_extension 工具加载(unpacked); chrome.storage 按 ID 索引, manifest.key 保证 ID 稳定 → 设置对应。
+  # 不写 Secure Preferences: Edge 用 profile 私钥对 extensions.settings.<id> 受保护字段做 MAC,
+  # 外部注入条目 MAC 无效 → 启动即丢弃 + 删 Extensions 目录(实测)。load-extension 绕过该校验。
+  $srcDir = Get-ExtensionLatestDir $extId
+  if (-not $srcDir) { Write-Step "extension $extId not in default profile, skipped"; return $null }
+  $ep = Get-DefaultProfile
+  # 1. 代码: Extensions\<id>\<ver>
+  $ver = Split-Path $srcDir -Leaf
+  $destCode = Join-Path $destProfile "Default\Extensions\$extId\$ver"
+  if (-not (Test-Path $destCode)) {
+    New-Item -ItemType Directory -Path (Split-Path $destCode -Parent) -Force | Out-Null
+    Copy-Item -Path $srcDir -Destination $destCode -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  if (-not (Test-Path $destCode)) { Write-Step "copy failed for $extId"; return $null }
+  # 2. chrome.storage.local / sync(ID 稳定 → 复用日常 profile 的设置)
+  foreach ($store in @("Local Extension Settings","Sync Extension Settings")) {
+    $srcStore = Join-Path $ep "Default\$store\$extId"
+    if (Test-Path $srcStore) {
+      $destStore = Join-Path $destProfile "Default\$store\$extId"
+      if (-not (Test-Path $destStore)) {
+        New-Item -ItemType Directory -Path (Split-Path $destStore -Parent) -Force | Out-Null
+        Copy-Item -Path $srcStore -Destination $destStore -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+  return $destCode
+}
+
+function Set-SessionPreferences([string]$destProfile) {
+  # 写隔离 profile 的 Default\Preferences 抑制翻译/下载框/权限请求。读-合并-无BOM写回。
+  $prefsFile = Join-Path $destProfile "Default\Preferences"
+  $prefs = $null
+  if (Test-Path $prefsFile) {
+    try { $raw = Get-Content $prefsFile -Raw -Encoding UTF8 -ErrorAction Stop; if ($raw -and $raw.Trim()) { $prefs = $raw | ConvertFrom-Json -ErrorAction Stop } }
+    catch { Write-Step "Preferences parse failed, skip suppress prefs (chromeArg still applies): $($_.Exception.Message)"; return }
+  }
+  if (-not $prefs) { $prefs = [PSCustomObject]@{} }
+
+  # translate.enabled = false(保险2; 保险1 是 chromeArg --disable-features=Translate)
+  if (-not $prefs.PSObject.Properties['translate']) { $prefs | Add-Member translate ([PSCustomObject]@{enabled=$false}) -Force }
+  elseif (-not $prefs.translate.PSObject.Properties['enabled']) { $prefs.translate | Add-Member enabled $false -Force }
+  else { $prefs.translate.enabled = $false }
+
+  # download.prompt_for_download = false(下载不弹保存框)
+  if (-not $prefs.PSObject.Properties['download']) { $prefs | Add-Member download ([PSCustomObject]@{prompt_for_download=$false}) -Force }
+  elseif (-not $prefs.download.PSObject.Properties['prompt_for_download']) { $prefs.download | Add-Member prompt_for_download $false -Force }
+  else { $prefs.download.prompt_for_download = $false }
+
+  # profile.default_content_setting_values: 通知/定位/摄像头/麦克风 block(2)
+  $dcs = [PSCustomObject]@{ notifications=2; geolocation=2; media_stream_camera=2; media_stream_mic=2 }
+  if (-not $prefs.PSObject.Properties['profile']) { $prefs | Add-Member profile ([PSCustomObject]@{default_content_setting_values=$dcs}) -Force }
+  elseif (-not $prefs.profile.PSObject.Properties['default_content_setting_values']) { $prefs.profile | Add-Member default_content_setting_values $dcs -Force }
+  else { foreach ($p in $dcs.PSObject.Properties) { $prefs.profile.default_content_setting_values | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force } }
+
+  $json = $prefs | ConvertTo-Json -Depth 100
+  [System.IO.File]::WriteAllText($prefsFile, $json, (New-Object System.Text.UTF8Encoding $false))
+}
+
 # --- cdt skill 安装到 AI 工具(仿 smart-search skills: ~/.<target>/skills/cdt/) ---
 $SkillName = "cdt"
 $TargetMap = [ordered]@{ "claude" = "Claude Code"; "codex" = "Codex" }
@@ -265,8 +446,23 @@ switch ($cmd) {
       # 2. clear Singleton lock left by puppeteer so chrome-devtools can launch same profile
       Get-ChildItem $profile -Filter "Singleton*" -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
-      # 3. start chrome-devtools (launch mode, headed, per-sessionId daemon)
-      $cdtArgs = @("start", "--userDataDir=$profile", "--sessionId=$sessionId", "--headless=false")
+      # 3. 默认扩展: 复制白名单扩展(代码+chrome.storage)到隔离 profile, 由步骤6 install_extension 加载
+      $loadDirs = @()
+      $wl = Get-WhitelistIds
+      if ($wl.Count -gt 0 -and (Get-DefaultProfile)) {
+        foreach ($id in $wl) { $d = Copy-ExtensionToProfile $id $profile; if ($d) { $loadDirs += $d } }
+        if ($loadDirs.Count -gt 0) { Write-Step "Prepared $($loadDirs.Count) extension(s) for install" }
+      }
+
+      # 4. 弹窗抑制 Preferences(翻译/下载框/权限请求)
+      Set-SessionPreferences $profile
+
+      # 5. start chrome-devtools (launch mode, headed, per-sessionId daemon)
+      # chromeArg 透传在 daemon 模式失效: serializeArgs 把 array 项展开成 "--chrome-arg <item>" 空格形式,
+      # 当 item 本身以 "--" 开头(如 --load-extension)时 daemon 层 yargs(strict)把它当未知选项丢弃(实测)。
+      # 故改用原生选项: --allow-unrestricted-paths 放开 install_extension 的 workspace roots 路径校验;
+      # --acceptInsecureCerts 替代 --ignore-certificate-errors。翻译/下载/权限靠步骤4的 Preferences。
+      $cdtArgs = @("start", "--userDataDir=$profile", "--sessionId=$sessionId", "--headless=false", "--allow-unrestricted-paths", "--acceptInsecureCerts")
       if ($Executable) { $cdtArgs += "--executablePath=$Executable" }
       Write-Step "chrome-devtools start (session=$sessionId)..."
       & chrome-devtools @cdtArgs 2>$null
@@ -274,6 +470,17 @@ switch ($cmd) {
       Unmark-Session $sessionId   # inject/launch 失败,释放占位,避免残留孤儿标记
       Write-Step "start failed, session claim released: $sessionId. Error: $($_.Exception.Message)"
       exit 1
+    }
+    # 6. install_extension 加载白名单扩展(chrome-devtools start 已返回=daemon ready; 路径校验已放开)。
+    # CDP 加载 unpacked 代码目录, manifest.key 保证 ID=商店ID → 读已复制的 chrome.storage → 带配置。
+    if ($loadDirs.Count -gt 0) {
+      $installed = 0
+      foreach ($d in $loadDirs) {
+        $r = cdt install_extension --session=$sessionId $d 2>$null | Out-String
+        if ($r -notmatch '"isError"\s*:\s*true' -and $r -notmatch '(?m)Error:') { $installed++ }
+        else { Write-Step "install_extension failed: $(Split-Path (Split-Path $d -Parent) -Leaf)" }
+      }
+      Write-Step "Installed $installed/$($loadDirs.Count) extension(s)"
     }
     Write-Step "Ready: session=$sessionId"
     Write-Step "Pass --session=$sessionId on EVERY subsequent cdt command (stop, navigate_page, take_snapshot, ...)."
@@ -304,7 +511,7 @@ switch ($cmd) {
 
   "config" {
     $sub = if ($args.Count -gt 1) { [string]$args[1] } else { "" }
-    $validKeys = @("executable", "httpPort", "wsPort", "profilesDir")
+    $validKeys = @("executable", "httpPort", "wsPort", "profilesDir", "defaultProfile")
     switch ($sub) {
       "set" {
         if ($args.Count -lt 4) {
@@ -379,6 +586,26 @@ switch ($cmd) {
       Write-Step "Edge OK ($Executable)"
     }
 
+    Write-Step "checking default profile (for extension loading)..."
+    if (-not (Read-Config).defaultProfile) {
+      $def = Join-Path $env:LOCALAPPDATA "Microsoft\Edge\User Data"
+      if (Test-Path $def) {
+        $cfg = Read-Config
+        if (-not $cfg) { $cfg = [PSCustomObject]@{} }
+        $cfg | Add-Member -NotePropertyName defaultProfile -NotePropertyValue $def -Force
+        ($cfg | ConvertTo-Json -Depth 10) | Set-Content -Path $ConfigFile -Encoding utf8
+        Write-Step "default profile detected + saved: $def"
+      } else {
+        Write-Step "default profile NOT found - set manually: cdt config set defaultProfile <path>"
+      }
+    } else {
+      $dp = [string](Read-Config).defaultProfile
+      if (Test-Path $dp) { Write-Step "default profile OK ($dp)" }
+      else { Write-Step "default profile configured but NOT found: $dp" }
+    }
+    $extCount = @(Get-InstalledExtensions).Count
+    Write-Step "extensions in default profile: $extCount (configure: cdt extensions list)"
+
     Start-DaemonIfNotRunning | Out-Null
     $s = Invoke-RestMethod "$HttpBase/status" -ErrorAction Stop
     if ($s.extConnected) { Write-Step "extension connected, cached cookies: $($s.cachedCookieCount)" }
@@ -448,6 +675,51 @@ switch ($cmd) {
         Write-Host "Usage: cdt sessions list | clean"
         Write-Host "  list   - show all started sessions (alive/orphan) + profiles"
         Write-Host "  clean  - remove markers + profiles for sessions whose daemon is no longer running"
+      }
+    }
+  }
+
+  "extensions" {
+    $ep = Get-DefaultProfile
+    $sub = if ($args.Count -gt 1) { [string]$args[1] } else { "" }
+    switch ($sub) {
+      "list" {
+        if (-not $ep) { Write-Step "default profile not found, run: cdt config set defaultProfile <path>"; exit 1 }
+        $wl = Get-WhitelistIds
+        $all = Get-InstalledExtensions
+        if ($all.Count -eq 0) { Write-Step "no extensions found in $ep"; exit 0 }
+        Write-Host ("  {0,-33} {1,-14} {2}" -f "ID","VERSION","NAME (*=whitelist)")
+        foreach ($e in ($all | Sort-Object Name)) {
+          $mark = if ($wl -contains $e.Id) { "*" } else { " " }
+          Write-Host ("{0} {1,-33} {2,-14} {3}" -f $mark, $e.Id, $e.Version, $e.Name)
+        }
+        Write-Step "add/remove with: cdt extensions add|remove <name|id>"
+      }
+      "add" {
+        if ($args.Count -lt 3) { Write-Host "Usage: cdt extensions add <name|id>"; exit 1 }
+        $id = Resolve-ExtensionArgument ([string]$args[2])
+        if (-not $id) { exit 1 }
+        $wl = Get-WhitelistIds
+        if ($wl -contains $id) { Write-Step "already in whitelist: $id"; exit 0 }
+        $wl += $id
+        Set-WhitelistIds $wl
+        Write-Step "added to whitelist: $id"
+      }
+      "remove" {
+        if ($args.Count -lt 3) { Write-Host "Usage: cdt extensions remove <name|id>"; exit 1 }
+        $id = Resolve-ExtensionArgument ([string]$args[2])
+        if (-not $id) { exit 1 }
+        $wl = Get-WhitelistIds
+        if ($wl -notcontains $id) { Write-Step "not in whitelist, nothing to remove: $id"; exit 0 }
+        $wl = @($wl | Where-Object { $_ -ne $id })
+        Set-WhitelistIds $wl
+        Write-Step "removed from whitelist: $id"
+      }
+      default {
+        Write-Host "Usage: cdt extensions list | add <name|id> | remove <name|id>"
+        Write-Host "  list    - show installed extensions in the default profile (* = in default-load whitelist)"
+        Write-Host "  add     - add an extension to the default-load whitelist (by name or ID)"
+        Write-Host "  remove  - remove from whitelist"
       }
     }
   }

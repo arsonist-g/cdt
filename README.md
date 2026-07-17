@@ -17,6 +17,8 @@ When an AI agent automates a browser that needs a login, you usually pick betwee
 - **Session isolation** — each `cdt start` spins up its own short session id, profile, and Edge process; concurrent AI windows never share a browser.
 - **On-demand CLI** — every chrome-devtools-mcp tool (`navigate_page`, `take_snapshot`, `click`, `fill`, …) becomes a shell command, scoped by `--session=<id>`.
 - **Self-cleaning** — `start`/`prepare` auto-reap dead sessions *and* hung launches (daemon alive but Edge never came up); a working session is never killed.
+- **Default extensions, with settings** — whitelisted extensions from your daily Edge (ad blocker, downloader, userscripts…) load into every isolated session already configured, not freshly installed — like opening a new window, not a new browser.
+- **Popups suppressed** — translate bubble, certificate-error pages, site permission prompts (notifications/location/camera/mic), and the download save dialog are pre-disabled so they don't block automation.
 - **AI-skill ready** — one command installs the cdt skill into Claude Code and Codex.
 
 ## How it works
@@ -91,8 +93,9 @@ Reuse the `session=<id>` from `cdt start` on every following command.
 | `cdt stop --session=<id>` | Stop session + kill leftover Edge + delete profile + clear marker |
 | `cdt sessions list` | List sessions (alive/orphan) + profiles |
 | `cdt sessions clean` | Remove markers + profiles for dead or hung sessions |
-| `cdt config set <k> <v>` | Set config (`executable` / `httpPort` / `wsPort` / `profilesDir`) |
-| `cdt doctor` | Install chrome-devtools CLI + detect Edge + check extension |
+| `cdt config set <k> <v>` | Set config (`executable` / `httpPort` / `wsPort` / `profilesDir` / `defaultProfile`) |
+| `cdt extensions list\|add\|remove` | Manage the default-load extension whitelist (by name or ID) |
+| `cdt doctor` | Install chrome-devtools CLI + detect Edge + detect default profile + check extension |
 | `cdt extension` | Print extension dir (load at `edge://extensions`) |
 | `cdt skills install\|status\|update\|uninstall` | Manage the AI skill (`--targets claude,codex\|all`) |
 | `cdt uninstall` | Remove skill + package |
@@ -112,10 +115,25 @@ Edge is the heartbeat: **daemon alive + Edge up = working → left alone**; daem
 cdt config set executable "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 cdt config set httpPort 17891
 cdt config set profilesDir "D:\cdt-profiles"
+cdt config set defaultProfile "%LOCALAPPDATA%\Microsoft\Edge\User Data"
 cdt config list
 ```
 
-Read on every run and injected into the process environment. Config lives in `~/.cdt/config.json`.
+Read on every run. Config lives in `~/.cdt/config.json`. Keys: `executable`, `httpPort`, `wsPort`, `profilesDir`, `defaultProfile` (your daily profile — the read-only source for extensions).
+
+## Default extensions & popup suppression
+
+Every `cdt start` copies your whitelisted extensions' **code + `chrome.storage`** into the isolated profile, then loads them with `install_extension`. Because store extensions ship a `manifest.key`, the loaded ID equals the one in your daily profile, so each extension reads its already-copied `chrome.storage` — it runs already configured, not freshly installed. This is decoupled from cookies: cookies still arrive via the extension bridge (App-Bound Encryption blocks copying them), while `chrome.storage` has no such protection and copies cleanly.
+
+Configure the whitelist once by name — cdt resolves it to the stable extension ID:
+
+```sh
+cdt extensions list                 # show installed extensions (* = whitelisted)
+cdt extensions add "AdGuard"        # add by name fragment or 32-char ID
+cdt extensions remove "AdGuard"
+```
+
+`cdt doctor` auto-detects `defaultProfile`. Popups are pre-suppressed on every session: translate bubble, certificate-error pages (`--acceptInsecureCerts`), site permission prompts (notifications/location/camera/mic), and the download save dialog — so they don't block `click`/`fill`.
 
 ## Troubleshooting
 

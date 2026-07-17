@@ -54,15 +54,23 @@ cdt <tool> --session=<id> [参数] [flags]
 | 命令 | 作用 |
 |---|---|
 | `cdt prepare` | 确保 daemon 在跑 + 报告扩展连接状态(会先自动清理孤儿会话)|
-| `cdt start` | 自动清理孤儿 + 注入登录 cookie + 启动隔离 Edge 会话(有头);自动生成并打印后续要用的 sessionId(不可自定义) |
+| `cdt start` | 自动清理孤儿 + 注入登录 cookie + 加载默认扩展 + 抑制弹窗 + 启动隔离 Edge 会话(有头);自动生成并打印后续要用的 sessionId(不可自定义) |
 | `cdt stop --session=<id>` | 停止会话 + 杀残留 Edge + 删 profile + 清标记 |
 | `cdt sessions list` | 列出所有已启动会话(alive/orphan)+ 是否有 profile |
 | `cdt sessions clean` | 清理 chrome-devtools daemon 已不在运行的那些会话的标记 + profile(daemon 与会话 1:1,daemon 死 = 会话死;绝不动活着的会话) |
-| `cdt doctor` | 检测/装 chrome-devtools CLI + 探测 Edge 写 config + 报告扩展 |
+| `cdt doctor` | 检测/装 chrome-devtools CLI + 探测 Edge + 探测 default profile + 报告扩展 |
 | `cdt extension` | 打印扩展目录(用户去 `edge://extensions` 加载) |
-| `cdt config set <k> <v>` | 设配置(executable/httpPort/wsPort/profilesDir) |
+| `cdt config set <k> <v>` | 设配置(executable/httpPort/wsPort/profilesDir/defaultProfile) |
+| `cdt extensions list\|add\|remove <名字\|id>` | 管理默认加载扩展白名单;白名单扩展每次 `cdt start` **带配置**加载(像日常 Edge 新开窗口) |
 | `cdt config get [k] \| list` | 读配置 |
 | `cdt skills install/status/update/uninstall [--targets claude,codex\|all]` | 在 Claude Code / Codex 中管理本 skill(`~/.<target>/skills/cdt/`) |
+
+## 默认扩展 & 弹窗抑制(每次 `cdt start` 自动)
+
+你**不需要**自己装扩展或关弹窗 —— `cdt start` 都自动做了:
+
+- **默认扩展** —— 日常 Edge 里白名单的扩展会**带配置**加载(代码 + chrome.storage 复制进隔离 profile,start 后用 `install_extension` 加载;manifest.key 保证 ID 稳定 → 读到已复制的设置),所以是已配置运行,不是裸装。白名单由用户一次性配置:`cdt extensions list` / `add <名字|id>` / `remove`。若站点因扩展缺失/多余表现异常,让用户调白名单,别在运行时装。
+- **弹窗抑制** —— 翻译气泡、证书错误页、站点权限请求(通知/定位/摄像头/麦克风)、下载保存框都预置关闭,不会挡 `click`/`fill` 目标。
 
 ## Input Automation(uid 来自快照)
 

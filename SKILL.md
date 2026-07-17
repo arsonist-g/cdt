@@ -54,15 +54,23 @@ cdt <tool> --session=<id> [arguments] [flags]
 | Command | Purpose |
 |---|---|
 | `cdt prepare` | Ensure the daemon is running + report extension connection status (auto-cleans orphans first) |
-| `cdt start` | Auto-clean orphans + inject login cookies + launch an isolated Edge session (headed); auto-generates + prints the sessionId to reuse (not customizable) |
+| `cdt start` | Auto-clean orphans + inject login cookies + load default extensions + suppress popups + launch an isolated Edge session (headed); auto-generates + prints the sessionId to reuse (not customizable) |
 | `cdt stop --session=<id>` | Stop session + kill leftover Edge + delete profile + clear marker |
 | `cdt sessions list` | List all started sessions (alive/orphan) + whether each has a profile |
 | `cdt sessions clean` | Remove markers + profiles for sessions whose chrome-devtools daemon is no longer running (daemon:session is 1:1, so daemon dead = session dead; never touches live sessions) |
-| `cdt doctor` | Check/install chrome-devtools CLI + detect Edge into config + report extension |
+| `cdt doctor` | Check/install chrome-devtools CLI + detect Edge + detect default profile + report extension |
 | `cdt extension` | Print the extension dir (load at `edge://extensions`) |
-| `cdt config set <k> <v>` | Set config (executable/httpPort/wsPort/profilesDir) |
+| `cdt config set <k> <v>` | Set config (executable/httpPort/wsPort/profilesDir/defaultProfile) |
+| `cdt extensions list\|add\|remove <name\|id>` | Manage the default-load extension whitelist; whitelisted extensions load **with their settings** every `cdt start` (like opening a new window in daily Edge) |
 | `cdt config get [k] \| list` | Read config |
 | `cdt skills install/status/update/uninstall [--targets claude,codex\|all]` | Manage this skill in Claude Code / Codex (`~/.<target>/skills/cdt/`) |
+
+## Default extensions & popup suppression (automatic on every `cdt start`)
+
+You do **not** need to load extensions or dismiss popups yourself — `cdt start` does both automatically:
+
+- **Default extensions** — whitelisted extensions from the user's daily Edge are loaded **with their settings** (code + chrome.storage are copied into the isolated profile, then loaded via `install_extension` after start; the `manifest.key` keeps the ID stable so each extension reads its already-copied chrome.storage) — so they're already configured and running, not freshly installed. The whitelist is configured once by the user with `cdt extensions list` / `add <name|id>` / `remove`. If a site misbehaves because an extension is missing or extra, ask the user to adjust the whitelist rather than installing at runtime.
+- **Popups suppressed** — translate bubble, certificate-error page, site permission prompts (notifications/location/camera/mic), and the download save dialog are pre-disabled so they don't block `click`/`fill` targets.
 
 ## Input Automation (uid from snapshot)
 

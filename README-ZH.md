@@ -17,6 +17,8 @@ AI 自动化需要登录态的浏览器时,通常要在两个糟糕选项里选:
 - **会话隔离** —— 每次 `cdt start` 生成独立的短 session id、profile、Edge 进程;并发 AI 窗口互不共享浏览器。
 - **按需 CLI** —— chrome-devtools-mcp 的每个工具(`navigate_page`、`take_snapshot`、`click`、`fill`…)都是一条 shell 命令,用 `--session=<id>` 作用域。
 - **自动清理** —— `start`/`prepare` 自动回收死会话*和*卡住的启动(daemon 活但 Edge 没起来);正在用的会话绝不被杀。
+- **默认扩展,带配置** —— 日常 Edge 里白名单的扩展(广告拦截、下载器、油猴脚本…)每次会话都带配置加载,不是裸装 —— 像新开窗口,不是新装浏览器。
+- **弹窗抑制** —— 翻译气泡、证书错误页、站点权限请求(通知/定位/摄像头/麦克风)、下载保存框都预置关闭,不挡自动化。
 - **AI skill 就绪** —— 一条命令把 cdt skill 装进 Claude Code 和 Codex。
 
 ## 工作原理
@@ -91,8 +93,9 @@ cdt stop --session=<id>
 | `cdt stop --session=<id>` | 停会话 + 杀残留 Edge + 删 profile + 清标记 |
 | `cdt sessions list` | 列出会话(alive/orphan)+ profile |
 | `cdt sessions clean` | 清死/卡住会话的标记 + profile |
-| `cdt config set <k> <v>` | 设配置(`executable`/`httpPort`/`wsPort`/`profilesDir`) |
-| `cdt doctor` | 装 chrome-devtools CLI + 探测 Edge + 检查扩展 |
+| `cdt config set <k> <v>` | 设配置(`executable`/`httpPort`/`wsPort`/`profilesDir`/`defaultProfile`) |
+| `cdt extensions list\|add\|remove` | 管理默认加载扩展白名单(按名字或 ID) |
+| `cdt doctor` | 装 chrome-devtools CLI + 探测 Edge + 探测 default profile + 检查扩展 |
 | `cdt extension` | 打印扩展目录(去 `edge://extensions` 加载) |
 | `cdt skills install\|status\|update\|uninstall` | 管理 AI skill(`--targets claude,codex\|all`) |
 | `cdt uninstall` | 删 skill + 包 |
@@ -112,10 +115,25 @@ cdt stop --session=<id>
 cdt config set executable "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 cdt config set httpPort 17891
 cdt config set profilesDir "D:\cdt-profiles"
+cdt config set defaultProfile "%LOCALAPPDATA%\Microsoft\Edge\User Data"
 cdt config list
 ```
 
-每次运行时读取,注入进进程环境。配置在 `~/.cdt/config.json`。
+每次运行时读取。配置在 `~/.cdt/config.json`。键:`executable`、`httpPort`、`wsPort`、`profilesDir`、`defaultProfile`(你的日常 profile —— 扩展的只读来源)。
+
+## 默认扩展 & 弹窗抑制
+
+每次 `cdt start` 把白名单扩展的**代码 + `chrome.storage`** 复制进隔离 profile,启动后用 `install_extension` 加载。商店扩展的 `manifest.key` 让加载后 ID 等于日常 profile 里的 ID,扩展直接读已复制的 `chrome.storage` —— 所以是带配置运行,不是裸装。这与 cookie 正交:cookie 仍走扩展桥接(App-Bound Encryption 不让复制),而扩展的 `chrome.storage` 没这个限制,可直接复制。
+
+白名单按名字一次性配置 —— cdt 解析成稳定的扩展 ID:
+
+```sh
+cdt extensions list                 # 列已装扩展(* = 白名单内)
+cdt extensions add "AdGuard"        # 按名字片段或 32 位 ID 添加
+cdt extensions remove "AdGuard"
+```
+
+`cdt doctor` 自动探测 `defaultProfile`。弹窗每次会话预置关闭:翻译气泡、证书错误页(`--acceptInsecureCerts`)、站点权限请求(通知/定位/摄像头/麦克风)、下载保存框 —— 不挡 `click`/`fill`。
 
 ## 故障排除
 

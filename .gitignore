@@ -1,0 +1,27 @@
+# —— 参考仓库(非本项目源码)——
+# 官方 chrome-devtools-mcp,克隆来本地参考,有独立 .git
+/chrome-devtools-mcp/
+
+# —— Node 依赖(任意层级)——
+node_modules/
+
+# —— 敏感数据:抓取的真实登录 cookie,绝不上传 ——
+bridge/cookies.json
+
+# —— 运行时 / 测试 profile ——
+bridge/.profiles/
+bridge/.poc-profile/
+
+# —— POC 测试脚本与产物 ——
+bridge/poc.mjs
+bridge/poc-result-*.png
+
+# —— 早期设计草稿(不公开)——
+docs/
+
+# —— OS / 编辑器杂项 ——
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp

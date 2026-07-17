@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "CDT Bridge",
+  "version": "0.1.0",
+  "description": "Expose daily Edge cookies to cdt (local PoC). Reads cookies via chrome.cookies and sends them over a local WebSocket.",
+  "icons": {
+    "16": "icons/cdt-16.png",
+    "48": "icons/cdt-48.png",
+    "128": "icons/cdt-128.png"
+  },
+  "permissions": ["cookies", "storage", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "CDT Bridge",
+    "default_icon": {
+      "16": "icons/cdt-16.png",
+      "48": "icons/cdt-48.png",
+      "128": "icons/cdt-128.png"
+    }
+  }
+}

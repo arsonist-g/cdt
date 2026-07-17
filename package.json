@@ -1,0 +1,24 @@
+{
+  "name": "@arsonist-g/cdt",
+  "version": "0.1.2",
+  "description": "cdt — drive isolated Edge with your daily login cookies via a browser-extension bridge (wrapper over chrome-devtools-mcp)",
+  "bin": {
+    "cdt": "bin/cdt.mjs"
+  },
+  "files": [
+    "bin",
+    "cdt.ps1",
+    "SKILL.md",
+    "bridge/daemon.mjs",
+    "bridge/package.json",
+    "extension"
+  ],
+  "dependencies": {
+    "puppeteer-core": "^25.3.0",
+    "ws": "^8.21.1"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true
+}

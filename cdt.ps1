@@ -6,7 +6,6 @@
 # each other's browser. Each AI gets a sessionId from `cdt start` and reuses it on later commands.
 #
 # Commands:
-#   cdt prepare                             Ensure bridge daemon running + report extension connection
 #   cdt start [--session=<id>]              Inject cookies + start chrome-devtools (isolated profile, headed).
 #                                           Prints the sessionId to reuse on subsequent commands.
 #   cdt <tool> --session=<id> [args...]     Forward to chrome-devtools (rejected if <id> was not started).
@@ -406,26 +405,13 @@ function Uninstall-SkillFrom([string]$target) {
 }
 
 if ($args.Count -eq 0) {
-  Write-Host "Usage: cdt prepare | start [--session=<id>] | stop --session=<id> | <tool> --session=<id> [args] | config ... | doctor | extension | skills ..."
+  Write-Host "Usage: cdt start [--session=<id>] | stop --session=<id> | <tool> --session=<id> [args] | config ... | doctor | extension | skills ..."
   exit 1
 }
 
 $cmd = [string]$args[0]
 
 switch ($cmd) {
-  "prepare" {
-    $cleaned = Invoke-SessionClean
-    if ($cleaned -gt 0) { Write-Step "auto-cleaned $cleaned orphan session(s)" }
-    Start-DaemonIfNotRunning | Out-Null
-    $s = Invoke-RestMethod "$HttpBase/status" -ErrorAction Stop
-    if ($s.extConnected) {
-      Write-Step "Extension connected. Cached cookies: $($s.cachedCookieCount)"
-    } else {
-      Write-Step "Extension NOT connected - load/refresh CDT Bridge extension in daily Edge (run: cdt extension)"
-    }
-    Write-Step "daemon: $HttpBase"
-  }
-
   "start" {
     $cleaned = Invoke-SessionClean
     if ($cleaned -gt 0) { Write-Step "auto-cleaned $cleaned orphan session(s)" }

@@ -16,7 +16,7 @@ AI 自动化需要登录态的浏览器时,通常要在两个糟糕选项里选:
 - **凭据留在本地** —— cookie 经 `127.0.0.1` 上的 WebSocket/HTTP 进入隔离 profile;不写进 cdt 配置,也不作为密码交给 AI。
 - **会话隔离** —— 每次 `cdt start` 生成独立的短 session id、profile、Edge 进程;并发 AI 窗口互不共享浏览器。
 - **按需 CLI** —— chrome-devtools-mcp 的每个工具(`navigate_page`、`take_snapshot`、`click`、`fill`…)都是一条 shell 命令,用 `--session=<id>` 作用域。
-- **自动清理** —— `start`/`prepare` 自动回收死会话*和*卡住的启动(daemon 活但 Edge 没起来);正在用的会话绝不被杀。
+- **自动清理** —— `start` 自动回收死会话*和*卡住的启动(daemon 活但 Edge 没起来);正在用的会话绝不被杀。
 - **默认扩展,带配置** —— 日常 Edge 里白名单的扩展(广告拦截、下载器、油猴脚本…)每次会话都带配置加载,不是裸装 —— 像新开窗口,不是新装浏览器。
 - **弹窗抑制** —— 翻译气泡、证书错误页、站点权限请求(通知/定位/摄像头/麦克风)、下载保存框都预置关闭,不挡自动化。
 - **AI skill 就绪** —— 一条命令把 cdt skill 装进 Claude Code 和 Codex。
@@ -60,10 +60,10 @@ cdt doctor
 
 在日常 Edge 加载 **CDT Bridge** 扩展:跑 `cdt extension` 打印路径,然后 `edge://extensions` → 开发者模式 → "加载解压缩的扩展" → 选那个目录。popup 应显示**已连接**。
 
-确认桥接:
+端到端确认桥接:
 
 ```sh
-cdt prepare     # 报告扩展状态 + cookie 数
+cdt doctor     # 最后一行应报告 "extension connected, cached cookies: N"
 ```
 
 (可选)把 skill 部署到 AI 工具,让 AI 能驱动 cdt:
@@ -87,7 +87,6 @@ cdt stop --session=<id>
 
 | 命令 | 作用 |
 |---|---|
-| `cdt prepare` | 确保 daemon 在跑 + 报告扩展状态(会先自动清孤儿) |
 | `cdt start` | 自动清理 + 注入 cookie + 启隔离 Edge;打印 sessionId(不可自定义) |
 | `cdt <tool> --session=<id> [args]` | 转发给 chrome-devtools(`navigate_page`、`take_snapshot`、`click`、`fill`…) |
 | `cdt stop --session=<id>` | 停会话 + 杀残留 Edge + 删 profile + 清标记 |
@@ -102,7 +101,7 @@ cdt stop --session=<id>
 
 ## 会话 & 自动清理
 
-每次 `cdt start` 建一个带短随机 id 的隔离会话。`cdt start` 和 `cdt prepare` 会先自动清理一次。当一个会话:
+每次 `cdt start` 建一个带短随机 id 的隔离会话。`cdt start` 会先自动清理一次。当一个会话:
 
 - **已死** —— chrome-devtools daemon 不再运行;或
 - **卡住** —— daemon 活着,但 Edge 超过 90s 没起来(启动卡住了);

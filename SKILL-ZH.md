@@ -13,21 +13,20 @@ description: 用本 skill 运行 shell 命令,完成需要登录态的浏览器�
 
 ## 自动清理
 
-每次 `cdt start` 和 `cdt prepare` 都会先自动清理一次。当一个 session 处于以下状态时,清掉它的标记 + 残留 Edge 进程 + profile:
+每次 `cdt start` 都会先自动清理一次。当一个 session 处于以下状态时,清掉它的标记 + 残留 Edge 进程 + profile:
 - **已死** —— chrome-devtools daemon 不再运行(daemon 与会话 1:1,daemon 死 = 会话死);或
 - **卡住** —— daemon 活着,但 Edge 超过 90s 没起来(启动卡住了)。
 
 一般不需要手动跑 `cdt sessions clean`。
 
-Edge 是活 session 的心跳:**daemon 活 + Edge 在 = 正常工作 → 不动**;daemon 活但过了 90s 宽限期还没 Edge = 启动卡住 → 及时清掉,不用等重启。所以卡住的 `cdt start` 在下次 start/prepare 就被回收,不会堆积;真正在用的 session 绝不会被杀。
+Edge 是活 session 的心跳:**daemon 活 + Edge 在 = 正常工作 → 不动**;daemon 活但过了 90s 宽限期还没 Edge = 启动卡住 → 及时清掉,不用等重启。所以卡住的 `cdt start` 在下次 start 就被回收,不会堆积;真正在用的 session 绝不会被杀。
 
 ## AI Workflow
 
-1. **Prepare**(首次/存疑时):`cdt prepare` — 确保 daemon 在跑 + 扩展已连接。
-2. **Start**:`cdt start` — 注入登录 cookie + 启动隔离 Edge 会话;自动生成并打印 `session=<id>`(start 不要带 `--session`)。**读它**,后续用它。
-3. **Inspect**:`cdt take_snapshot --session=<id>` — 拿元素 uid。
-4. **Act**:`cdt click --session=<id> <uid>` / `cdt fill --session=<id> <uid> <value>` 等。
-5. **Stop**:完成时 `cdt stop --session=<id>`(停会话 + 杀残留 Edge + 删 profile)。
+1. **Start**:`cdt start` — 注入登录 cookie + 启动隔离 Edge 会话;自动生成并打印 `session=<id>`(start 不要带 `--session`)。**读它**,后续用它。
+2. **Inspect**:`cdt take_snapshot --session=<id>` — 拿元素 uid。
+3. **Act**:`cdt click --session=<id> <uid>` / `cdt fill --session=<id> <uid> <value>` 等。
+4. **Stop**:完成时 `cdt stop --session=<id>`(停会话 + 杀残留 Edge + 删 profile)。
 
 快照示例:
 ```
@@ -53,7 +52,6 @@ cdt <tool> --session=<id> [参数] [flags]
 
 | 命令 | 作用 |
 |---|---|
-| `cdt prepare` | 确保 daemon 在跑 + 报告扩展连接状态(会先自动清理孤儿会话)|
 | `cdt start` | 自动清理孤儿 + 注入登录 cookie + 加载默认扩展 + 抑制弹窗 + 启动隔离 Edge 会话(有头);自动生成并打印后续要用的 sessionId(不可自定义) |
 | `cdt stop --session=<id>` | 停止会话 + 杀残留 Edge + 删 profile + 清标记 |
 | `cdt sessions list` | 列出所有已启动会话(alive/orphan)+ 是否有 profile |
@@ -175,5 +173,5 @@ cdt screencast_stop --session=<id>
 - `cdt start` 碰到 session id 冲突 → 先判断这个会话是不是你自己起的;是你自己的才能 `cdt stop --session=<id>`,不是就再跑一次 `cdt start` 拿新的自动 id。
 - `cdt start` 报"扩展未连接" → 让用户日常 Edge 刷新 CDT Bridge 扩展(popup 应显示"已连接");或 `cdt extension` 拿加载路径。
 - 点击/填写无反应 → 重新 `take_snapshot`(uid 失效)。
-- 页面需登录却显示登录页 → 让用户 `cdt prepare` 刷新 cookie 快照(短 session 站点)。
+- 页面需登录却显示登录页 → 该短 session 站点的 cookie 快照已过期;让用户日常 Edge 刷新 CDT Bridge 扩展,再 `cdt start` 开新会话重新注入 cookie。
 - `cdt doctor` 报 chrome-devtools 缺失 → 自动装;失败手动 `npm i -g chrome-devtools-mcp@latest`。

@@ -13,21 +13,20 @@ description: Use this skill to run shell commands to automate browser tasks that
 
 ## Auto-cleanup
 
-Every `cdt start` and `cdt prepare` first runs an automatic cleanup. It removes a session's marker, leftover Edge processes, and profile when the session is:
+Every `cdt start` first runs an automatic cleanup. It removes a session's marker, leftover Edge processes, and profile when the session is:
 - **dead** — its chrome-devtools daemon is no longer running (daemon:session is 1:1, so daemon dead = session dead); or
 - **hung** — the daemon is alive but Edge never came up for over 90s (a stuck launch).
 
 You normally don't need to run `cdt sessions clean` yourself.
 
-Edge is the heartbeat of a live session: **daemon alive + Edge up = working → left alone**; daemon alive + Edge absent past the 90s grace window = stuck launch → cleaned promptly instead of waiting for a reboot. So a hung `cdt start` gets reaped on the next start/prepare, never piling up, and a genuinely working session is never killed.
+Edge is the heartbeat of a live session: **daemon alive + Edge up = working → left alone**; daemon alive + Edge absent past the 90s grace window = stuck launch → cleaned promptly instead of waiting for a reboot. So a hung `cdt start` gets reaped on the next start, never piling up, and a genuinely working session is never killed.
 
 ## AI Workflow
 
-1. **Prepare** (first time / when in doubt): `cdt prepare` — ensure the daemon is running + extension is connected.
-2. **Start**: `cdt start` — inject login cookies + launch an isolated Edge session; it auto-generates + prints `session=<id>` (do not pass `--session` to start). **Read it** and reuse below.
-3. **Inspect**: `cdt take_snapshot --session=<id>` — get an element uid.
-4. **Act**: `cdt click --session=<id> <uid>` / `cdt fill --session=<id> <uid> <value>` etc.
-5. **Stop**: when done, `cdt stop --session=<id>` (stop session + kill leftover Edge + delete profile).
+1. **Start**: `cdt start` — inject login cookies + launch an isolated Edge session; it auto-generates + prints `session=<id>` (do not pass `--session` to start). **Read it** and reuse below.
+2. **Inspect**: `cdt take_snapshot --session=<id>` — get an element uid.
+3. **Act**: `cdt click --session=<id> <uid>` / `cdt fill --session=<id> <uid> <value>` etc.
+4. **Stop**: when done, `cdt stop --session=<id>` (stop session + kill leftover Edge + delete profile).
 
 Snapshot example:
 ```
@@ -53,7 +52,6 @@ cdt <tool> --session=<id> [arguments] [flags]
 
 | Command | Purpose |
 |---|---|
-| `cdt prepare` | Ensure the daemon is running + report extension connection status (auto-cleans orphans first) |
 | `cdt start` | Auto-clean orphans + inject login cookies + load default extensions + suppress popups + launch an isolated Edge session (headed); auto-generates + prints the sessionId to reuse (not customizable) |
 | `cdt stop --session=<id>` | Stop session + kill leftover Edge + delete profile + clear marker |
 | `cdt sessions list` | List all started sessions (alive/orphan) + whether each has a profile |
@@ -175,5 +173,5 @@ cdt screencast_stop --session=<id>
 - a session id collision on `cdt start` → first decide whether you started that session yourself; only `cdt stop --session=<id>` it if you did, otherwise just run `cdt start` again for a fresh auto id.
 - `cdt start` reports "extension not connected" → have the user refresh the CDT Bridge extension in daily Edge (popup should show "connected"); or run `cdt extension` for the load path.
 - click/fill has no effect → re-run `take_snapshot` (uid stale).
-- page needs login but shows the login page → have the user run `cdt prepare` to refresh the cookie snapshot (short-session sites).
+- page needs login but shows the login page → the cookie snapshot is stale for that short-session site; have the user refresh the CDT Bridge extension in daily Edge, then `cdt start` a fresh session to re-inject cookies.
 - `cdt doctor` reports chrome-devtools missing → auto-installed; on failure run `npm i -g chrome-devtools-mcp@latest` manually.

@@ -16,7 +16,7 @@ When an AI agent automates a browser that needs a login, you usually pick betwee
 - **Credentials stay local** — cookies travel over a WebSocket/HTTP on `127.0.0.1` into an isolated profile; they're never written to cdt's config or handed to the AI as passwords.
 - **Session isolation** — each `cdt start` spins up its own short session id, profile, and Edge process; concurrent AI windows never share a browser.
 - **On-demand CLI** — every chrome-devtools-mcp tool (`navigate_page`, `take_snapshot`, `click`, `fill`, …) becomes a shell command, scoped by `--session=<id>`.
-- **Self-cleaning** — `start`/`prepare` auto-reap dead sessions *and* hung launches (daemon alive but Edge never came up); a working session is never killed.
+- **Self-cleaning** — `start` auto-reaps dead sessions *and* hung launches (daemon alive but Edge never came up); a working session is never killed.
 - **Default extensions, with settings** — whitelisted extensions from your daily Edge (ad blocker, downloader, userscripts…) load into every isolated session already configured, not freshly installed — like opening a new window, not a new browser.
 - **Popups suppressed** — translate bubble, certificate-error pages, site permission prompts (notifications/location/camera/mic), and the download save dialog are pre-disabled so they don't block automation.
 - **AI-skill ready** — one command installs the cdt skill into Claude Code and Codex.
@@ -60,10 +60,10 @@ cdt doctor
 
 Load the **CDT Bridge** extension in your daily Edge: run `cdt extension` to print its path, then `edge://extensions` → Developer mode → "Load unpacked" → select that directory. The popup should show **connected**.
 
-Confirm the bridge:
+Confirm the bridge end-to-end:
 
 ```sh
-cdt prepare     # reports extension status + cookie count
+cdt doctor     # last line should report "extension connected, cached cookies: N"
 ```
 
 (Optional) Deploy the skill to AI tools so the AI can drive cdt:
@@ -87,7 +87,6 @@ Reuse the `session=<id>` from `cdt start` on every following command.
 
 | Command | Purpose |
 |---|---|
-| `cdt prepare` | Ensure daemon running + report extension status (auto-cleans orphans first) |
 | `cdt start` | Auto-clean + inject cookies + launch isolated Edge; prints sessionId (not customizable) |
 | `cdt <tool> --session=<id> [args]` | Forward to chrome-devtools (`navigate_page`, `take_snapshot`, `click`, `fill`, …) |
 | `cdt stop --session=<id>` | Stop session + kill leftover Edge + delete profile + clear marker |
@@ -102,7 +101,7 @@ Reuse the `session=<id>` from `cdt start` on every following command.
 
 ## Sessions & automatic cleanup
 
-Each `cdt start` creates an isolated session with a short random id. `cdt start` and `cdt prepare` first run an automatic cleanup. A session is reaped when:
+Each `cdt start` creates an isolated session with a short random id. `cdt start` first runs an automatic cleanup. A session is reaped when:
 
 - **dead** — its chrome-devtools daemon is no longer running; or
 - **hung** — the daemon is alive but Edge never came up for over 90s (a stuck launch).

@@ -88,6 +88,20 @@ function Start-DaemonIfNotRunning {
   throw "bridge daemon failed to start (node PID=$($p.Id))"
 }
 
+function Wait-ExtensionConnected([int]$TimeoutSec = 35) {
+  # 扩展靠 chrome.alarms(MV3 最小周期 30s)重连: daemon 冷启后立刻读 extConnected 会落进重连窗口, 误报断连。
+  # 宽限轮询覆盖该周期; 已连则首次即返回(零等待); daemon 其间挂掉则提前返回 false。
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $s = Invoke-RestMethod "$HttpBase/status" -TimeoutSec 2 -ErrorAction Stop
+      if ($s.extConnected) { return $true }
+    } catch { return $false }
+    Start-Sleep -Milliseconds 2000
+  }
+  return $false
+}
+
 function Test-SessionStarted([string]$id) { return (Test-Path (Join-Path $SessionsDir "$id.started")) }
 
 function Unmark-Session([string]$id) {
@@ -129,7 +143,7 @@ function Test-DaemonAlive([string]$id) {
 
 function Get-EdgeProcesses([string]$id) {
   # 属于本 session 的 Edge 进程(CommandLine 的 profile 路径含 cdt-<id>)
-  return @(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -ErrorAction SilentlyContinue |
+  return @(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -OperationTimeoutSec 30 -ErrorAction SilentlyContinue |
            Where-Object { $_.CommandLine -and ($_.CommandLine -like "*cdt-$id*") })
 }
 
@@ -416,6 +430,16 @@ switch ($cmd) {
     $cleaned = Invoke-SessionClean
     if ($cleaned -gt 0) { Write-Step "auto-cleaned $cleaned orphan session(s)" }
     Start-DaemonIfNotRunning | Out-Null
+    # daemon 冷启后扩展还在 30s alarm 重连窗口里; 不等的话紧接的 inject 会因 extConnected=false 误失败。
+    try { $extOk = (Invoke-RestMethod "$HttpBase/status" -TimeoutSec 2 -ErrorAction Stop).extConnected } catch { $extOk = $false }
+    if (-not $extOk) {
+      Write-Step "waiting for CDT Bridge extension to reconnect..."
+      $extOk = Wait-ExtensionConnected 35
+    }
+    if (-not $extOk) {
+      Write-Step "extension NOT connected - run 'cdt extension' for the load path, then retry (cdt start)."
+      exit 1
+    }
     if ($SessionId) { Write-Step "start ignores --session=<id>; the session id is auto-generated and cannot be customized." }
     # 原子占位:CreateNew 保证并发 start 不会拿到同一个 id(消除竞态)。do/until 直到占到一个空 id。
     do { $sessionId = New-SessionId } until (Try-ClaimSession $sessionId)
@@ -426,7 +450,7 @@ switch ($cmd) {
       # 1. inject cookies into the isolated profile (headed, known to persist)
       $body = @{ userDataDir = $profile; executablePath = $Executable; headless = $false } | ConvertTo-Json -Compress
       Write-Step "Injecting cookies into $profile ..."
-      $inj = Invoke-RestMethod -Method POST -Uri "$HttpBase/inject" -Body $body -ContentType "application/json" -ErrorAction Stop
+      $inj = Invoke-RestMethod -Method POST -Uri "$HttpBase/inject" -Body $body -ContentType "application/json" -TimeoutSec 120 -ErrorAction Stop
       Write-Step "Injected $($inj.injected) cookies"
 
       # 2. clear Singleton lock left by puppeteer so chrome-devtools can launch same profile
@@ -451,10 +475,34 @@ switch ($cmd) {
       $cdtArgs = @("start", "--userDataDir=$profile", "--sessionId=$sessionId", "--headless=false", "--allow-unrestricted-paths", "--acceptInsecureCerts")
       if ($Executable) { $cdtArgs += "--executablePath=$Executable" }
       Write-Step "chrome-devtools start (session=$sessionId)..."
-      & chrome-devtools @cdtArgs 2>$null
+      # chrome-devtools 输出重定向到日志文件(诊断 + 避免 disclaimer 刷终端)。
+      # 注意: stdio 继承的切断由 bin/cdt.mjs(powershell 用 pipe 而非 inherit)统一处理 —— PS 层的 1>file 不改变
+      # native 的 OS stdout handle, 单靠它解决不了 `cdt start | head` 卡死。保留 "& chrome-devtools" 直接调用
+      # (已知可靠); 不用 Start-Process 是因为 PS5.1 它 + 重定向 + WaitForExit 易死锁, 且系统 PATHEXT 不含 .ps1
+      # 会命中无扩展名 bash shim。超时见 inject 的 -TimeoutSec。
+      $logDir = Join-Path $DataDir ".logs"
+      if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+      $outLog = Join-Path $logDir "start-${sessionId}.out.log"
+      $errLog = Join-Path $logDir "start-${sessionId}.err.log"
+      & chrome-devtools @cdtArgs 1>$outLog 2>$errLog
+      if ($LASTEXITCODE -ne 0) { throw "chrome-devtools start failed exit=$LASTEXITCODE (log: $errLog)" }
     } catch {
       Unmark-Session $sessionId   # inject/launch 失败,释放占位,避免残留孤儿标记
-      Write-Step "start failed, session claim released: $sessionId. Error: $($_.Exception.Message)"
+      # Invoke-RestMethod 在 503 时抛的异常 message 只是 "(503) 服务器不可用", 吞掉了 daemon 返回的真实原因。
+      # 从异常 Response 的 body 里取 daemon 的 JSON error, 让失败可操作(而非一句不可操作的 503)。
+      $detail = $null
+      if ($_.Exception -and $_.Exception.Response) {
+        try {
+          $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+          $rb = $reader.ReadToEnd(); $reader.Close()
+          $j = $rb | ConvertFrom-Json -ErrorAction SilentlyContinue
+          if ($j -and $j.error) { $detail = [string]$j.error } elseif ($rb) { $detail = $rb }
+        } catch {}
+      }
+      Write-Step "start failed, session claim released: $sessionId."
+      Write-Step "  Reason: $(if ($detail) { $detail } else { $_.Exception.Message })"
+      Write-Step "  Hint: doctor 只查 /status(daemon活+扩展连+缓存cookie), 不验证 puppeteer 能否起 Edge;"
+      Write-Step "        run 'cdt doctor' 做 inject 预检。常见: 扩展断连/Edge 路径错/profile 锁残留。重试: cdt start"
       exit 1
     }
     # 6. install_extension 加载白名单扩展(chrome-devtools start 已返回=daemon ready; 路径校验已放开)。
@@ -484,7 +532,7 @@ switch ($cmd) {
     & chrome-devtools stop --sessionId=$sessionId 2>$null
 
     # kill Edge processes still holding the profile
-    $holds = @(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -ErrorAction SilentlyContinue |
+    $holds = @(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -OperationTimeoutSec 30 -ErrorAction SilentlyContinue |
               Where-Object { $_.CommandLine -and ($_.CommandLine -like "*cdt-$sessionId*") })
     foreach ($h in $holds) {
       Write-Step "kill leftover Edge PID=$($h.ProcessId)"
@@ -594,8 +642,37 @@ switch ($cmd) {
 
     Start-DaemonIfNotRunning | Out-Null
     $s = Invoke-RestMethod "$HttpBase/status" -ErrorAction Stop
-    if ($s.extConnected) { Write-Step "extension connected, cached cookies: $($s.cachedCookieCount)" }
-    else { Write-Step "extension NOT connected - run 'cdt extension' for the load path" }
+    if (-not $s.extConnected) {
+      # daemon 冷启后扩展还在 30s alarm 重连窗口里, 直接读 extConnected 会误报断连。宽限轮询覆盖该周期再判定。
+      Write-Step "extension not connected yet, waiting up to 35s for reconnect (daemon may have just started)..."
+      if (Wait-ExtensionConnected 35) {
+        $s = Invoke-RestMethod "$HttpBase/status" -ErrorAction Stop
+      } else {
+        $s = $null
+        Write-Step "extension NOT connected - run 'cdt extension' for the load path (start will fail until connected)"
+      }
+    }
+    if ($s -and $s.extConnected) {
+      Write-Step "extension connected, cached cookies: $($s.cachedCookieCount)"
+      # inject 预检: 实际用 puppeteer 起一个 headless Edge 注入 cookie, 验证 start 能否成功。
+      # /status 是浅检(daemon活+扩展连+缓存cookie), 不证明 puppeteer 能起 Edge; 此预检补上这层, 消除"doctor 全绿但 start 失败"。
+      Write-Step "probing inject (headless Edge launch)..."
+      $probeProfile = Join-Path $ProfilesDir "cdt-doctor-probe"
+      if (Test-Path $probeProfile) { Remove-Item $probeProfile -Recurse -Force -ErrorAction SilentlyContinue }
+      try {
+        $body = @{ userDataDir = $probeProfile; executablePath = $Executable; headless = $true } | ConvertTo-Json -Compress
+        $pr = Invoke-RestMethod -Method POST -Uri "$HttpBase/inject" -Body $body -ContentType "application/json" -TimeoutSec 120 -ErrorAction Stop
+        Write-Step "inject OK (headless Edge launched, $($pr.injected) cookies) - start should work"
+      } catch {
+        $pdetail = $null
+        if ($_.Exception -and $_.Exception.Response) {
+          try { $pr2 = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream()); $prb = $pr2.ReadToEnd(); $pr2.Close(); $pj = $prb | ConvertFrom-Json -ErrorAction SilentlyContinue; if ($pj -and $pj.error) { $pdetail = [string]$pj.error } elseif ($prb) { $pdetail = $prb } } catch {}
+        }
+        Write-Step "inject FAILED - cdt start will likely fail too: $(if ($pdetail) { $pdetail } else { $_.Exception.Message })"
+      } finally {
+        if (Test-Path $probeProfile) { Remove-Item $probeProfile -Recurse -Force -ErrorAction SilentlyContinue }
+      }
+    }
     Write-Step "doctor done."
   }
 
